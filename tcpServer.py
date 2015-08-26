@@ -3,8 +3,9 @@ import time
 import datetime
 import logging
 import wx
+from wx.lib.pubsub import setupkwargs
 from wx.lib.pubsub import pub
-import SocketServer
+import sys
 
 logging.basicConfig(level=logging.INFO,
                     format='%(name)s: %(message)s')

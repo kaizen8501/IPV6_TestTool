@@ -10,11 +10,12 @@
 import wx
 import os
 import wx.xrc
+from wx.lib.pubsub import setupkwargs
 from wx.lib.pubsub import pub
 import serial
 import serial.tools.list_ports
 import threading
-import wx.lib.newevent
+#import wx.lib.newevent
 import time
 import sys
 import filecmp
@@ -58,7 +59,7 @@ class TCPLoopback_Infinite(threading.Thread):
                     if self._parent.m_checkBox_IsTCPServer.GetValue() == True:
                         wx.CallAfter(pub.sendMessage,'TCPS_Send_Data',data=send_data)
                     elif self._parent.m_checkBox_IsTCPClient.GetValue() == True:
-                        self._parent.m_tcp_client_sock.sendall(send_data)
+                        wx.CallAfter(self._parent.m_tcp_client_sock.sendall,send_data)
 
             except Exception as e:
                 s = str(e)
@@ -79,27 +80,28 @@ class TCPC_RecvThread(threading.Thread):
         threading.Thread.__init__(self)
         self._parent = parent
         self._isStop = False
-        self.start()
         self.recv_data = ''
+        self.start()
         
     def run(self):
         while True:
             if self._isStop == True:
                 self._parent.m_tcp_client_sock.close()
                 break
+ 
             try:
                 self.recv_data = self._parent.m_tcp_client_sock.recv(1024)
             except socket.timeout:
                 continue
             except Exception as e:
                 wx.CallAfter(wx.MessageBox,e,'Warning', wx.OK|wx.ICON_ERROR)
-            
+             
             if not self.recv_data:
                 self._parent.m_tcp_client_sock.close()
                 break
-        
+ 
             wx.CallAfter(pub.sendMessage,'TCPS_Recv_data',data=self.recv_data)
-            
+
     def stop(self):
         self._isStop = True
         self._parent.m_tcp_client_sock.close()
@@ -321,6 +323,15 @@ class Serial2Ethernet_Test_Tool ( wx.Frame ):
         
         sbSizer12.Add( bSizer16, 1, wx.EXPAND, 5 )
         
+        bSizer19 = wx.BoxSizer( wx.HORIZONTAL )
+        
+        self.m_gauge_TCP_Loop_Gauge = wx.Gauge( sbSizer12.GetStaticBox(), wx.ID_ANY, 100, wx.DefaultPosition, wx.DefaultSize, wx.GA_HORIZONTAL )
+        self.m_gauge_TCP_Loop_Gauge.SetValue( 0 ) 
+        bSizer19.Add( self.m_gauge_TCP_Loop_Gauge, 1, wx.ALL, 5 )
+        
+        
+        sbSizer12.Add( bSizer19, 0, wx.EXPAND, 5 )
+        
         
         bSizer11.Add( sbSizer12, 0, wx.EXPAND, 5 )
         
@@ -487,9 +498,10 @@ class Serial2Ethernet_Test_Tool ( wx.Frame ):
         # User Code
         self.m_ser_IsOpen = False
         self.m_IstcpLoopback_First = False
-        self.m_IstcpLoopback_Stop = False
+        self.m_IstcpLoopback_run = False
         self.m_tcpLoopback_recv_data = ''
         self.m_tcpTestCnt = 0
+        self.m_tcpTest_Speed_sum = 0
         self.m_tcp_client_sock = 0
         self.m_is_run_tcp_server = False
         self.m_is_run_tcp_client = False
@@ -515,8 +527,14 @@ class Serial2Ethernet_Test_Tool ( wx.Frame ):
         if self.m_ser_IsOpen == True:
             self.m_ser_recv_run_event.clear()
             self.m_ser.close()
-        else:
-            self.m_tcp_client_sock.close()
+
+        if self.m_is_run_tcp_server == True:
+            self.onTCPS_Close(None)
+        if self.m_is_run_tcp_client == True:
+            self.onTCPC_Close(None)
+        if self.m_IstcpLoopback_run == True:
+            self.onTCP_Loopback_TestStop(None)
+
         
      
     def GetComPortList(self):
@@ -553,44 +571,53 @@ class Serial2Ethernet_Test_Tool ( wx.Frame ):
             cv.acquire()
             if self.m_IstcpLoopback_First == True:
                 self.m_TcpRecvStartTime = int(round(time.time()*1000))
-                self.TcpRecvDialog = wx.ProgressDialog('TCP Loopback Test','Recv Data & Speed', self.m_tcpFileSize,
-                                                       style=wx.PD_CAN_ABORT | wx.PD_ELAPSED_TIME | wx.PD_REMAINING_TIME)
+                
                 self.m_tcpLoopback_recv_data = data
                 self.m_IstcpLoopback_First = False
+
+                self.recved_size = len(self.m_tcpLoopback_recv_data)
+                wx.CallAfter(self.m_gauge_TCP_Loop_Gauge.SetRange,self.m_tcpFileSize)
+                wx.CallAfter(self.m_gauge_TCP_Loop_Gauge.SetValue,self.recved_size)
+
             else:
                 self.m_tcpLoopback_recv_data += data
+                self.recved_size = len(self.m_tcpLoopback_recv_data)
 
-            recved_size = len(self.m_tcpLoopback_recv_data)
-            if recved_size >= self.m_tcpFileSize:
-                self.m_tcpTestCnt +=1
-                self.TcpRecvDialog.Destroy()
-                
-                # Calculate test time and speed
-                self.m_TcpRecvEndTime = int(round(time.time()*1000)) - self.m_TcpRecvStartTime
-                speed = float((recved_size * 8) / self.m_TcpRecvEndTime)
-                
-                # File Compare
-                recv_file = open("recv_data.log","wb")
-                recv_file.write(self.m_tcpLoopback_recv_data)
-                recv_file.close()
-                result = filecmp.cmp(self.m_textCtrl_TCP_FilePath.GetValue(), "recv_data.log")
-
-                # Print test information
-                output_string = "[Test %d] time : %dms, data len : %d speed %.2fK bps\r\n" %(self.m_tcpTestCnt, self.m_TcpRecvEndTime, recved_size, speed)
-                wx.CallAfter(self.m_textCtrl_TCPScreen.AppendText,output_string)
-
-                message = "Test Result(File Compare) : %s\r\n" % str(result)
-                wx.CallAfter(self.m_textCtrl_TCPScreen.AppendText,message)  
-                
-                cv.notify()
-            else:
-                self.TcpRecvDialog.Update(recved_size)
+                if self.recved_size >= self.m_tcpFileSize:
+                    #self.m_IstcpLoopback_First = True
+                    self.m_tcpTestCnt +=1
+                    wx.CallAfter(self.m_gauge_TCP_Loop_Gauge.SetValue,0)
+                    
+                    # Calculate test time and speed
+                    self.m_TcpRecvEndTime = int(round(time.time()*1000)) - self.m_TcpRecvStartTime
+                    speed = float((self.recved_size * 8) / self.m_TcpRecvEndTime)
+                    
+                    # File Compare
+                    recv_file = open("recv_data.log","wb")
+                    recv_file.write(self.m_tcpLoopback_recv_data)
+                    recv_file.close()
+                    result = filecmp.cmp(self.m_textCtrl_TCP_FilePath.GetValue(), "recv_data.log")
+                    
+                    if result == False:
+                        wx.MessageBox("Test Error, Data Invalid", 'Warning', wx.OK | wx.ICON_ERROR)                    
+                        cv.notify()
+                        cv.release()
+                        self.onTCP_Loopback_TestStop(None)
+                        return  
+    
+                    # Print test information
+                    self.m_tcpTest_Speed_sum = self.m_tcpTest_Speed_sum + speed
+                    test_ave = self.m_tcpTest_Speed_sum/self.m_tcpTestCnt
+                    output_string = "[Test %d] time : %dms, data len : %d speed %.3fMbps ave %.3fMbps\r\n" %(self.m_tcpTestCnt, self.m_TcpRecvEndTime, 
+                                                                                                             self.recved_size, (speed/1024), (test_ave/1024))
+                    wx.CallAfter(self.m_textCtrl_TCPScreen.AppendText,output_string)
+                    cv.notify()
+            
+            wx.CallAfter(self.m_gauge_TCP_Loop_Gauge.SetValue,self.recved_size)
             cv.release()
     
     def TCPStatus_Recv(self, data):
-        lock.acquire()
         wx.CallAfter(self.m_textCtrl_TCPS_ClientConnectionStatus.AppendText,data)
-        lock.release()
         
     #****************************************
             
@@ -758,12 +785,15 @@ class Serial2Ethernet_Test_Tool ( wx.Frame ):
             self.m_textCtrl_TCP_FilePath.SetValue(filename)
 
     def onTCP_Loopback_TestStart( self, event ):
+        self.m_IstcpLoopback_run = True
         if self.m_checkBox_InfiniteLoop.GetValue() == True:
             self.m_tcpTestCnt = 0
+            self.m_tcpTest_Speed_sum = 0
             self.m_button_TCP_Loopback_TestStart.Disable()
             self.m_button_TCP_Loopback_TestStop.Enable()
             self.TCPLoopback_Infinite = TCPLoopback_Infinite(self)
         else:
+            cv.acquire()
             self.m_tcpFileName = self.m_textCtrl_TCP_FilePath.GetValue()
             if self.m_tcpFileName == '':
                 return
@@ -776,7 +806,6 @@ class Serial2Ethernet_Test_Tool ( wx.Frame ):
                 file_data += data
             send_file.close()
 
-            lock.acquire()
             self.m_IstcpLoopback_First = True
             try:
                 for i in xrange(0,self.m_tcpFileSize,1024):
@@ -790,10 +819,10 @@ class Serial2Ethernet_Test_Tool ( wx.Frame ):
             except Exception as e:
                 s = str(e)
                 wx.MessageBox(s, 'Warning', wx.OK | wx.ICON_ERROR)
-            lock.release()
+            cv.release()
 
     def onTCP_Loopback_TestStop( self, event ):
-        self.m_IstcpLoopback_Stop = True
+        self.m_IstcpLoopback_run = False
         self.TCPLoopback_Infinite.stop()
         self.m_button_TCP_Loopback_TestStart.Enable()
         self.m_button_TCP_Loopback_TestStop.Disable()
@@ -842,7 +871,7 @@ class Serial2Ethernet_Test_Tool ( wx.Frame ):
         else:
             self.m_tcp_client_sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
         
-        self.m_tcp_client_sock.settimeout(0.5)
+        self.m_tcp_client_sock.settimeout(1)
         server_address = (str(self.m_textCtrl_TCPC_TargetIP.GetValue()), int(self.m_textCtrl_TCPC_Port.GetValue()) )
         try:
             self.m_tcp_client_sock.connect(server_address)
@@ -850,7 +879,6 @@ class Serial2Ethernet_Test_Tool ( wx.Frame ):
             wx.MessageBox("Fail to connection. Please check IP address of server", 'Warning', wx.OK | wx.ICON_ERROR)
             return
         
-
         self.m_button_TCPC_Close.Enable()
         self.m_button_TCPC_Connect.Disable()
         self.m_is_run_tcp_client = True
